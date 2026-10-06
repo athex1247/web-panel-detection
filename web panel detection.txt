@@ -1,0 +1,173 @@
+                            web panel detection 
+                    -----------------------------------
+--------------------------------------------------------------------
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+
+
+$ErrorActionPreference = "Stop"
+
+# ===== SETTINGS =====
+$chrome = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+$out = "$env:USERPROFILE\Desktop\Chrome_Web_History.html"
+$temp = "$env:TEMP\chrome_history_scan"
+$zip = "$temp\sqlite.zip"
+$sqlite = "$temp\sqlite3.exe"
+
+# Current official SQLite Windows x64 CLI
+$url = "https://www.sqlite.org/2026/sqlite-tools-win-x64-3530400.zip"
+
+Write-Host "=== Chrome Web History -> HTML Scanner ===" -ForegroundColor Cyan
+
+# Create temp folder
+New-Item -ItemType Directory -Path $temp -Force | Out-Null
+
+# Download SQLite CLI if needed
+if (!(Test-Path $sqlite)) {
+    Write-Host "Downloading SQLite CLI..." -ForegroundColor Yellow
+    Invoke-WebRequest -Uri $url -OutFile $zip
+    Expand-Archive -Path $zip -DestinationPath $temp -Force
+}
+
+if (!(Test-Path $sqlite)) {
+    Write-Host "sqlite3.exe পাওয়া যায়নি." -ForegroundColor Red
+    exit
+}
+
+if (!(Test-Path $chrome)) {
+    Write-Host "Chrome User Data পাওয়া যায়নি." -ForegroundColor Red
+    exit
+}
+
+# HTML header
+$html = @"
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Chrome Web History Report</title>
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background:#111;
+    color:#eee;
+    margin:30px;
+}
+h1 {
+    color:#fff;
+}
+.profile {
+    margin-top:30px;
+    padding:15px;
+    background:#1b1b1b;
+    border-radius:10px;
+}
+table {
+    width:100%;
+    border-collapse:collapse;
+    margin-top:15px;
+}
+th,td {
+    padding:10px;
+    border:1px solid #333;
+    text-align:left;
+    vertical-align:top;
+}
+th {
+    background:#222;
+}
+td.url {
+    word-break:break-all;
+}
+tr:hover {
+    background:#202020;
+}
+</style>
+</head>
+<body>
+<h1>Chrome Web History Report</h1>
+<p>Generated: $(Get-Date)</p>
+"@
+
+$profiles = Get-ChildItem $chrome -Directory |
+    Where-Object {
+        $_.Name -eq "Default" -or $_.Name -like "Profile *"
+    }
+
+foreach ($profile in $profiles) {
+
+    $history = Join-Path $profile.FullName "History"
+
+    if (!(Test-Path $history)) {
+        continue
+    }
+
+    Write-Host "Scanning: $($profile.Name)" -ForegroundColor Green
+
+    # Copy Chrome DB so Chrome can remain untouched
+    $copy = Join-Path $temp ("History_" + $profile.Name.Replace(" ","_"))
+
+    Copy-Item $history $copy -Force
+
+    $query = @"
+SELECT
+    url,
+    title,
+    datetime(last_visit_time/1000000-11644473600,'unixepoch','localtime')
+FROM urls
+ORDER BY last_visit_time DESC;
+"@
+
+    $sqlFile = Join-Path $temp "query.sql"
+    $csvFile = Join-Path $temp ("result_" + $profile.Name.Replace(" ","_") + ".csv")
+
+    Set-Content -Path $sqlFile -Value $query -Encoding UTF8
+
+    & $sqlite $copy -header -csv ".read $sqlFile" |
+        Set-Content -Path $csvFile -Encoding UTF8
+
+    $html += "<div class='profile'>"
+    $html += "<h2>Profile: $($profile.Name)</h2>"
+    $html += "<table>"
+    $html += "<tr><th>Visit Time</th><th>Title</th><th>Full URL / Web Path</th></tr>"
+
+    if (Test-Path $csvFile) {
+
+        $rows = Import-Csv $csvFile
+
+        foreach ($row in $rows) {
+
+            $time = [System.Net.WebUtility]::HtmlEncode([string]$row.'datetime(last_visit_time/1000000-11644473600,''unixepoch'',''localtime'')')
+            $title = [System.Net.WebUtility]::HtmlEncode([string]$row.title)
+            $urlEsc = [System.Net.WebUtility]::HtmlEncode([string]$row.url)
+
+            $html += "<tr>"
+            $html += "<td>$time</td>"
+            $html += "<td>$title</td>"
+            $html += "<td class='url'>$urlEsc</td>"
+            $html += "</tr>"
+        }
+    }
+
+    $html += "</table></div>"
+
+    Remove-Item $copy -Force
+    Remove-Item $csvFile -Force -ErrorAction SilentlyContinue
+}
+
+$html += "</body></html>"
+
+Set-Content -Path $out -Value $html -Encoding UTF8
+
+# Cleanup temporary SQLite files
+Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host ""
+Write-Host "====================================" -ForegroundColor Cyan
+Write-Host "SCAN COMPLETE" -ForegroundColor Green
+Write-Host "HTML REPORT:" -ForegroundColor Yellow
+Write-Host $out
+Write-Host "====================================" -ForegroundColor Cyan
+
+Start-Process $out
