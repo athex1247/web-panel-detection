@@ -1,0 +1,149 @@
+             web history check 
+-----------------------------------------
++++++++++++++++++++++++++++++++++++++++++
+
+
+
+# ================================
+# WEB HISTORY CHECKER - POWERSHELL
+# Chrome History Scanner
+# ================================
+
+$ErrorActionPreference = "SilentlyContinue"
+
+$chrome = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+$out = "$env:USERPROFILE\Desktop\Web_History_Report.txt"
+$temp = "$env:TEMP\WebHistoryChecker"
+
+New-Item -ItemType Directory -Path $temp -Force | Out-Null
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "        WEB HISTORY CHECKER" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Download SQLite CLI automatically
+$sqlite = "$temp\sqlite3.exe"
+
+if (!(Test-Path $sqlite)) {
+
+    Write-Host "[+] Preparing SQLite engine..." -ForegroundColor Yellow
+
+    $zip = "$temp\sqlite.zip"
+
+    # SQLite official Windows CLI package
+    $download = "https://www.sqlite.org/2026/sqlite-tools-win-x64-3510100.zip"
+
+    try {
+        Invoke-WebRequest $download -OutFile $zip -UseBasicParsing
+        Expand-Archive $zip -DestinationPath $temp -Force
+    }
+    catch {
+        Write-Host "[!] Could not obtain SQLite." -ForegroundColor Red
+        exit
+    }
+}
+
+# Locate sqlite3.exe
+$sqliteFound = Get-ChildItem $temp -Filter "sqlite3.exe" -Recurse |
+    Select-Object -First 1
+
+if (!$sqliteFound) {
+    Write-Host "[!] sqlite3.exe not found." -ForegroundColor Red
+    exit
+}
+
+$sqlite = $sqliteFound.FullName
+
+if (!(Test-Path $chrome)) {
+    Write-Host "[!] Chrome User Data folder not found." -ForegroundColor Red
+    exit
+}
+
+$report = @()
+
+$report += "=============================================="
+$report += "          CHROME WEB HISTORY REPORT"
+$report += "Generated: $(Get-Date)"
+$report += "=============================================="
+$report += ""
+
+$profiles = Get-ChildItem $chrome -Directory |
+    Where-Object {
+        $_.Name -eq "Default" -or $_.Name -like "Profile *"
+    }
+
+foreach ($profile in $profiles) {
+
+    $history = Join-Path $profile.FullName "History"
+
+    if (!(Test-Path $history)) {
+        continue
+    }
+
+    Write-Host "[+] Checking $($profile.Name) ..." -ForegroundColor Green
+
+    # Copy history so original Chrome DB is untouched
+    $copy = Join-Path $temp "History_$($profile.Name.Replace(' ','_'))"
+
+    Copy-Item $history $copy -Force
+
+    $query = @"
+SELECT
+url,
+title,
+datetime(last_visit_time/1000000-11644473600,'unixepoch','localtime')
+FROM urls
+ORDER BY last_visit_time DESC;
+"@
+
+    $sql = Join-Path $temp "query.sql"
+    $csv = Join-Path $temp "history.csv"
+
+    Set-Content $sql $query -Encoding UTF8
+
+    & $sqlite $copy -header -csv ".read $sql" |
+        Set-Content $csv -Encoding UTF8
+
+    $report += ""
+    $report += "=============================================="
+    $report += "PROFILE: $($profile.Name)"
+    $report += "=============================================="
+
+    if (Test-Path $csv) {
+
+        $rows = Import-Csv $csv
+
+        foreach ($row in $rows) {
+
+            $url = [string]$row.url
+            $title = [string]$row.title
+
+            $report += ""
+            $report += "TIME : $($row.'datetime(last_visit_time/1000000-11644473600,''unixepoch'',''localtime'')')"
+            $report += "TITLE: $title"
+            $report += "URL  : $url"
+            $report += "----------------------------------------------"
+        }
+    }
+
+    Remove-Item $copy -Force
+}
+
+# Save report
+$report | Out-File $out -Encoding UTF8
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "SCAN COMPLETE" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Report saved here:" -ForegroundColor Yellow
+Write-Host $out -ForegroundColor White
+Write-Host ""
+
+Start-Process notepad.exe $out
+
+# Cleanup
+Remove-Item $temp -Recurse -Force
